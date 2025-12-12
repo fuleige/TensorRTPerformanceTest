@@ -5,6 +5,12 @@ set(PROJECT_NAME tensortRT_demo)
 project(${PROJECT_NAME})
 add_executable(${PROJECT_NAME} main.cpp)
 
+
+# 查找cuda环境
+find_package(CUDA  REQUIRED)
+include_directories("${CUDA_INCLUDE_DIRS}")
+
+
 # 从系统环境中寻找tensorRT相关的头文件和库
 find_path(TENSORRT_INCLUDE_DIR NvInfer.h
     HINTS ${TENSORRT_ROOT} ${CUDA_TOOLKIT_ROOT_DIR}
@@ -31,8 +37,12 @@ message(STATUS "TENSORRT_LIBRARY_PARSER: ${TENSORRT_LIBRARY_PARSER}")
 target_link_libraries(${PROJECT_NAME} PRIVATE 
                         ${TENSORRT_LIBRARY_INFER}
                         ${TENSORRT_LIBRARY_INFER_PLUGIN}
-                        ${TENSORRT_LIBRARY_PARSER})
+                        ${TENSORRT_LIBRARY_PARSER}
+                        ${CUDA_LIBRARIES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
                             ${TENSORRT_INCLUDE_DIR})
+
+target_sources(${PROJECT_NAME} PRIVATE 
+                            ${CMAKE_CURRENT_SOURCE_DIR}/TensortRTExecuteEngine.cpp)
 
