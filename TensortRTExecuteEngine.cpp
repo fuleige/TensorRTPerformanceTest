@@ -22,6 +22,8 @@ namespace fulei
             return;
         }
 
+        data_type_size_ = config.data_type_size;
+
         // 3. 预分配缓冲区
         const int num_io_tensors = engine->getNbIOTensors();
         for (int i = 0; i < num_io_tensors; ++i)
@@ -41,7 +43,7 @@ namespace fulei
                 {
                     memory_size *= dims.d[j];
                 }
-
+                input_host_sizes_.emplace_back(dims);
                 // 申请输入显存
                 input_names.emplace_back(name);
                 input_gpu_ptrs_.emplace_back(nullptr);
@@ -79,7 +81,7 @@ namespace fulei
                 {
                     memory_size *= dims.d[j];
                 }
-
+                output_host_sizes_.emplace_back(dims);
                 output_gpu_ptrs_.emplace_back(nullptr);
                 output_host_ptrs_.emplace_back(nullptr);
                 // 申请输出显存
@@ -105,6 +107,91 @@ namespace fulei
         }
     }
 
+    const char *ExecutionContext::getInputAddress(const std::string &input_name)
+    {
+        for (size_t i = 0; i < input_names.size(); ++i)
+        {
+            if (input_names[i] == input_name)
+            {
+                return input_host_ptrs_[i];
+            }
+        }
+        return nullptr;
+    }
+
+    const char *ExecutionContext::getOutputAddress(const std::string &output_name)
+    {
+        for (size_t i = 0; i < output_names.size(); ++i)
+        {
+            if (output_names[i] == output_name)
+            {
+                return output_host_ptrs_[i];
+            }
+        }
+        return nullptr;
+    }
+
+    // 执行推理
+    void ExecutionContext::executeInference(size_t batch_size)
+    {
+        if (!context_)
+        {
+            FL_LOG_ERROR("上下文未初始化");
+            return;
+        }
+
+        // 拷贝输入数据
+        for (size_t i = 0; i < input_names.size(); ++i)
+        {
+            nvinfer1::Dims input_dim = input_host_sizes_[i];
+            input_dim.d[0] = batch_size;
+            if (!context_->setInputShape(input_names[i].c_str(), input_dim))
+            {
+                FL_LOG_ERROR("为输入张量 %s 设置显存地址失败，错误: %s", input_names[i].c_str(), cudaGetErrorString(cudaGetLastError()));
+                return;
+            }
+            // 计算输入张量的内存大小
+            size_t input_size = batch_size * data_type_size_;
+            for (int j = 1; j < input_dim.nbDims; ++j)
+            {
+                input_size *= input_dim.d[j];
+            }
+            if (cudaMemcpyAsync(input_gpu_ptrs_[i], input_host_ptrs_[i], input_size, cudaMemcpyHostToDevice, stream_) != cudaSuccess)
+            {
+                FL_LOG_ERROR("拷贝输入张量 %s 到显存失败，大小: %zu，错误: %s", input_names[i].c_str(), input_size, cudaGetErrorString(cudaGetLastError()));
+                return;
+            }
+        }
+
+        // 执行推理
+        if (!context_->enqueueV3(stream_))
+        {
+            FL_LOG_ERROR("执行推理失败，错误: %s", cudaGetErrorString(cudaGetLastError()));
+            return;
+        }
+
+        // 拷贝输出数据
+        for (size_t i = 0; i < output_names.size(); ++i)
+        {
+            size_t output_size = batch_size * data_type_size_;
+            for (int j = 1; j < output_host_sizes_[i].nbDims; ++j)
+            {
+                output_size *= output_host_sizes_[i].d[j];
+            }
+            if (cudaMemcpyAsync(output_host_ptrs_[i], output_gpu_ptrs_[i], output_size, cudaMemcpyDeviceToHost, stream_) != cudaSuccess)
+            {
+                FL_LOG_ERROR("拷贝输出张量 %s 到主机内存失败，大小: %zu，错误: %s", output_names[i].c_str(), output_size, cudaGetErrorString(cudaGetLastError()));
+                return;
+            }
+        }
+
+        if (cudaStreamSynchronize(stream_) != cudaSuccess)
+        {
+            FL_LOG_ERROR("同步流失败，错误: %s", cudaGetErrorString(cudaGetLastError()));
+            return;
+        }
+    }
+
     ExecutionContext::~ExecutionContext()
     {
         if (stream_)
@@ -119,7 +206,7 @@ namespace fulei
         switch (severity)
         {
         case Severity::kVERBOSE:
-            FL_LOG_DEBUG("TensorRT verbose: %s", msg);
+            // FL_LOG_DEBUG("TensorRT verbose: %s", msg);
             break;
         case Severity::kINFO:
             FL_LOG_INFO("TensorRT info: %s", msg);
@@ -147,88 +234,6 @@ namespace fulei
     void TensorRTLogger::setLogLevel(nvinfer1::ILogger::Severity level)
     {
         log_level_ = level;
-    }
-
-    bool TensorRTEngineManager::buildEngineFromOnnx(const std::string &onnx_path)
-    {
-        // 创建builder
-        auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(trt_logger_));
-        if (!builder)
-        {
-            FL_LOG_ERROR("创建TensorRT builder失败");
-            return false;
-        }
-
-        // 创建网络定义
-        const auto explicit_batch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-        auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicit_batch));
-        if (!network)
-        {
-            FL_LOG_ERROR("创建网络定义失败");
-            return false;
-        }
-
-        // 创建ONNX解析器
-        auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, trt_logger_));
-        if (!parser)
-        {
-            FL_LOG_ERROR("创建ONNX解析器失败");
-            return false;
-        }
-
-        // 解析ONNX文件
-        if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(trt_logger_.getLogLevel())))
-        {
-            FL_LOG_ERROR("解析ONNX文件失败: %s", onnx_path.c_str());
-            return false;
-        }
-
-        // 创建构建配置
-        auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
-        if (!config)
-        {
-            FL_LOG_ERROR("创建构建配置失败");
-            return false;
-        }
-
-        // 设置精度
-        // if (config_.precision == Precision::FP16) {
-        //     if (builder->platformHasFastFp16()) {
-        //         config->setFlag(nvinfer1::BuilderFlag::kFP16);
-        //         FL_LOG_INFO("启用FP16精度");
-        //     } else {
-        //         FL_LOG_WARNING("平台不支持FP16，使用FP32精度");
-        //     }
-        // } else if (config_.precision == Precision::INT8) {
-        //     if (builder->platformHasFastInt8()) {
-        //         config->setFlag(nvinfer1::BuilderFlag::kINT8);
-        //         FL_LOG_INFO("启用INT8精度");
-        //     } else {
-        //         FL_LOG_WARNING("平台不支持INT8，使用FP32精度");
-        //     }
-        // }
-
-        // 构建引擎
-        auto engine = std::unique_ptr<nvinfer1::ICudaEngine>(builder->buildEngineWithConfig(*network, *config));
-        if (!engine)
-        {
-            FL_LOG_ERROR("构建TensorRT引擎失败");
-            return false;
-        }
-
-        // 创建运行时
-        runtime_.reset(nvinfer1::createInferRuntime(trt_logger_));
-        if (!runtime_)
-        {
-            FL_LOG_ERROR("创建TensorRT运行时失败");
-            return false;
-        }
-
-        // 转移引擎所有权
-        shared_engine_.reset(engine.release());
-
-        FL_LOG_INFO("从ONNX构建TensorRT引擎成功");
-        return true;
     }
 
     bool TensorRTEngineManager::loadEngineFromFile(const std::string &engine_path)
@@ -284,20 +289,7 @@ namespace fulei
         std::string extension = model_path.substr(model_path.find_last_of('.') + 1);
         bool success = false;
 
-        if (extension == "onnx")
-        {
-            FL_LOG_INFO("从ONNX文件构建TensorRT引擎: %s", model_path.c_str());
-            success = buildEngineFromOnnx(model_path);
-
-            // 保存构建的引擎
-            // if (success)
-            // {
-            //     std::string engine_path = model_path.substr(0, model_path.find_last_of('.')) + ".trt";
-            //     FL_LOG_INFO("保存TensorRT引擎到文件: %s", engine_path.c_str());
-            //     success = saveEngineToFile(engine_path);
-            // }
-        }
-        else if (extension == "trt" || extension == "engine")
+        if (extension == "trt" || extension == "engine")
         {
             FL_LOG_INFO("从TensorRT引擎文件加载: %s", model_path.c_str());
             success = loadEngineFromFile(model_path);
@@ -317,6 +309,88 @@ namespace fulei
         is_initialized_ = true;
         FL_LOG_INFO("TensorRTEngineManager初始化成功");
         return true;
+    }
+
+    thread_local std::unique_ptr<ExecutionContext> TensorRTEngineManager::thread_context_ = nullptr;
+
+    /**
+     * 为当前线程创建执行上下文 (每个线程需要创建)
+     * @return 是否创建成功
+     */
+    ExecutionContext *TensorRTEngineManager::getThreadContext()
+    {
+        if (!shared_engine_)
+        {
+            FL_LOG_ERROR("引擎未初始化");
+            return nullptr;
+        }
+
+        // 创建执行上下文
+        if (!thread_context_)
+        {
+            thread_context_.reset(new ExecutionContext(shared_engine_.get(), config_));
+        }
+
+        return thread_context_->isSuccess() ? thread_context_.get() : nullptr;
+    }
+
+    const char *TensorRTEngineManager::getInputAddress(const std::string &input_name)
+    {
+        auto thread_context = getThreadContext();
+        if (!thread_context)
+        {
+            FL_LOG_ERROR("线程上下文未初始化");
+            return nullptr;
+        }
+        return thread_context->getInputAddress(input_name);
+    }
+
+    const char *TensorRTEngineManager::getOutputAddress(const std::string &output_name)
+    {
+        auto thread_context = getThreadContext();
+        if (!thread_context)
+        {
+            FL_LOG_ERROR("线程上下文未初始化");
+            return nullptr;
+        }
+        return thread_context->getOutputAddress(output_name);
+    }
+
+    /**
+     * 执行推理
+     */
+    void TensorRTEngineManager::executeInference(size_t batch_size)
+    {
+        auto thread_context = getThreadContext();
+        if (!thread_context)
+        {
+            FL_LOG_ERROR("线程上下文未初始化");
+            return;
+        }
+        thread_context->executeInference(batch_size);
+    }
+
+    void TensorRTEngineManager::ModelDetail()
+    {
+        if (!shared_engine_)
+        {
+            FL_LOG_ERROR("引擎未初始化");
+            return;
+        }
+        // 打印模型详情
+        int nb_tensors = shared_engine_->getNbIOTensors();
+        for (int i = 0; i < nb_tensors; i++)
+        {
+            const char *name = shared_engine_->getIOTensorName(i);
+            nvinfer1::Dims dims = shared_engine_->getTensorShape(name);
+            auto io_mode = shared_engine_->getTensorIOMode(name);
+            std::cout << (io_mode == nvinfer1::TensorIOMode::kINPUT ? "Input" : "Output") << " " << "Tensor \"" << name << "\" shape: ";
+            for (int d = 0; d < dims.nbDims; d++)
+            {
+                std::cout << dims.d[d] << " ";
+            }
+            std::cout << std::endl;
+        }
     }
 
 }

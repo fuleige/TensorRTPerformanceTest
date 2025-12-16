@@ -4,6 +4,7 @@
 ```bash
 sudo apt-get install tensorrt-dev
 sudo apt-get install tensorrt-libs
+sudo apt-get install libopencv-dev
 ```
 
 ### 推理性能加速细节
@@ -50,4 +51,5 @@ memset(data, 0, batch_data_memory_size);
     - DMA必须知道数据的物理地址, 操作系统一般对应用程序分配是"虚拟地址",且操作系统可能会将内存块置换到磁盘中
     - 为了防止操作系统这种问题, cuda驱动也自己会临时分配一块锁页内存,先讲数据拷贝到这块临时内存,再讲这个临时锁页内存拷贝到GPU显存中
     - 而我们申请内存时直接使用 `cudaMallocHost`直接分配锁页内存, 减少了一次内存拷贝时间
+- 同时经过测试, `cudaMallocHost`分配的内存块没有首次写的耗时
 

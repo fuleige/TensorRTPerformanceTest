@@ -33,15 +33,27 @@ message(STATUS "TENSORRT_LIBRARY_INFER: ${TENSORRT_LIBRARY_INFER}")
 message(STATUS "TENSORRT_LIBRARY_INFER_PLUGIN: ${TENSORRT_LIBRARY_INFER_PLUGIN}")
 message(STATUS "TENSORRT_LIBRARY_PARSER: ${TENSORRT_LIBRARY_PARSER}")
 
+# 利用OpenMP并行化
+find_package(OpenMP REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
+message(STATUS "OpenMP_CXX_LIBRARIES: ${OpenMP_CXX_LIBRARIES}")
+
+# 查找OpenCV环境
+find_package(OpenCV REQUIRED)
+include_directories("${OpenCV_INCLUDE_DIRS}")
+message(STATUS "OpenCV_INCLUDE_DIRS: ${OpenCV_INCLUDE_DIRS}")
+message(STATUS "OpenCV_LIBRARIES: ${OpenCV_LIBRARIES}")
 
 target_link_libraries(${PROJECT_NAME} PRIVATE 
                         ${TENSORRT_LIBRARY_INFER}
                         ${TENSORRT_LIBRARY_INFER_PLUGIN}
                         ${TENSORRT_LIBRARY_PARSER}
-                        ${CUDA_LIBRARIES})
+                        ${CUDA_LIBRARIES}
+                        ${OpenCV_LIBRARIES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
-                            ${TENSORRT_INCLUDE_DIR})
+                            ${TENSORRT_INCLUDE_DIR}
+                            ${OpenCV_INCLUDE_DIRS})
 
 target_sources(${PROJECT_NAME} PRIVATE 
                             ${CMAKE_CURRENT_SOURCE_DIR}/TensortRTExecuteEngine.cpp)
