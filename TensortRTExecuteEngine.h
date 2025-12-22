@@ -19,7 +19,7 @@ namespace fulei
     {
 
         // onnx文件有可能batch_size维度是动态的-1,可以预先指定最大batch_size
-        int max_batch_size{64};
+        size_t max_batch_size{64};
 
         // 注意需要考虑预先分配内存重复利用问题, 所以最好处理batch_size, 其它的所有的维度都是固定的
         // 如果非固定的也最好有有个最大值限制
